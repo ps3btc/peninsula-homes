@@ -1,0 +1,13 @@
+name = "peninsula-homes-api"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Daily Redfin scans: 11:00 Pacific (full day's listings) and 23:00 Pacific
+# (evening refresh + status/school backfill with remaining fetch budget).
+[triggers]
+crons = ["0 18 * * *", "0 6 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "peninsula-homes"
+database_id = "ad827322-db9f-4789-92b9-ded24b44fc14"

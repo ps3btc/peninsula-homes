@@ -1,0 +1,18 @@
+{
+  "name": "peninsula-homes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Real estate dashboard for Los Altos, Mountain View and Palo Alto houses <= $6M, scraped from Redfin, served by Cloudflare Workers + Pages with D1 storage.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:pages": "wrangler pages deploy web --project-name=peninsula-homes",
+    "db:migrate:local": "wrangler d1 execute peninsula-homes --local --file=schema.sql",
+    "db:migrate": "wrangler d1 execute peninsula-homes --remote --file=schema.sql",
+    "schools:backfill": "node scripts/backfill-schools.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

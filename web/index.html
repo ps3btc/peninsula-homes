@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Peninsula Homes — Los Altos · Mountain View · Palo Alto</title>
+  <meta name="description" content="Houses for sale in Los Altos, Mountain View and Palo Alto up to $6M, with school zoning, refreshed daily from Redfin." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏡</text></svg>" />
+  <link rel="stylesheet" href="./styles.css" />
+  <script>window.API_BASE = "https://peninsula-homes-api.flyingokapi.workers.dev";</script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>Peninsula Homes</h1>
+      <p class="sub">Houses ≤ $6M in Los Altos · Mountain View · Palo Alto — data via Redfin, refreshed daily</p>
+    </div>
+    <div class="head-right">
+      <span id="last-scan" class="muted"></span>
+      <button id="refresh" class="btn ghost" title="Reload data">⟳ Refresh</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button data-status="active" class="tab active">Available <span class="count" id="count-active">–</span></button>
+    <button data-status="pending" class="tab">Pending <span class="count" id="count-pending">–</span></button>
+    <button data-status="sold" class="tab">Sold <span class="count" id="count-sold">–</span></button>
+  </nav>
+
+  <section class="filters">
+    <select id="f-city">
+      <option value="">All cities</option>
+      <option selected>Los Altos</option>
+      <option>Mountain View</option>
+      <option>Palo Alto</option>
+    </select>
+    <select id="f-price">
+      <option value="">Any price</option>
+      <option value="2000000">≤ $2M</option>
+      <option value="3000000">≤ $3M</option>
+      <option value="4000000">≤ $4M</option>
+      <option value="5000000">≤ $5M</option>
+      <option value="6000000">≤ $6M</option>
+    </select>
+    <select id="f-beds">
+      <option value="">Any beds</option>
+      <option value="2">2+ beds</option>
+      <option value="3">3+ beds</option>
+      <option value="4">4+ beds</option>
+      <option value="5">5+ beds</option>
+    </select>
+    <select id="f-sort">
+      <option value="listed" selected>Recently listed</option>
+      <option value="newest">Newest first</option>
+      <option value="price_asc">Price ↑</option>
+      <option value="price_desc">Price ↓</option>
+      <option value="sqft">Largest sqft</option>
+      <option value="sold_desc">Recently sold first</option>
+    </select>
+    <input id="f-q" type="search" placeholder="Search address…" />
+  </section>
+
+  <main id="grid" class="grid" aria-live="polite"></main>
+  <p id="empty" class="empty hidden">No listings match the current filters.</p>
+
+  <footer class="foot muted">
+    <p>Listings scraped from <a href="https://www.redfin.com/city/11018/CA/Los-Altos" target="_blank" rel="noopener">Redfin</a> (table-layout data). Statuses tracked over time: active → pending → sold. School zoning as published by Redfin / GreatSchools.</p>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>
