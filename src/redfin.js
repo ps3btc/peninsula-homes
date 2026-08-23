@@ -154,6 +154,16 @@ export function normalizeGisHome(h) {
     // gis soldDate is epoch-ms of the last public sale (for active homes)
     lastSoldYear: h.soldDate ? new Date(h.soldDate).getUTCFullYear() : null,
     uiPropertyType: h.uiPropertyType ?? null,
+    // Open house schedule from the gis feed (if present).
+    openHouses: Array.isArray(h.openHouses)
+      ? h.openHouses
+          .filter((oh) => oh && oh.date)
+          .map((oh) => ({
+            date: typeof oh.date === 'string' ? oh.date : new Date(oh.date).toISOString().slice(0, 10),
+            time: oh.time || null,
+            comment: oh.comment || oh.notes || null,
+          }))
+      : [],
   };
 }
 

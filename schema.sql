@@ -84,3 +84,54 @@ CREATE TABLE IF NOT EXISTS notification_queue (
   sent_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_notify_unsent ON notification_queue(sent_at) WHERE sent_at IS NULL;
+
+-- Community favorites: global list shared across all visitors.
+-- Any visitor can star/unstar a property; all visitors see the same list.
+CREATE TABLE IF NOT EXISTS favorites (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  property_id INTEGER NOT NULL REFERENCES properties(property_id),
+  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  UNIQUE(property_id)
+);
+CREATE INDEX IF NOT EXISTS idx_favorites_property ON favorites(property_id);
+
+-- Open house dates extracted from the Redfin gis feed during scans.
+CREATE TABLE IF NOT EXISTS open_houses (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  property_id INTEGER NOT NULL REFERENCES properties(property_id),
+  date        TEXT NOT NULL,
+  time        TEXT,
+  comment     TEXT,
+  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_open_houses_property ON open_houses(property_id);
+CREATE INDEX IF NOT EXISTS idx_open_houses_date ON open_houses(date);
+
+-- Fair market valuations compiled manually via browser research on the
+-- listing page (Redfin/Zillow), triggered by favoriting a property.
+CREATE TABLE IF NOT EXISTS valuations (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  property_id      INTEGER NOT NULL REFERENCES properties(property_id),
+  estimated_value  INTEGER NOT NULL,
+  confidence       TEXT NOT NULL DEFAULT 'medium',
+  reasoning        TEXT,
+  price_per_sqft   INTEGER,
+  comparables_used INTEGER DEFAULT 0,
+  model            TEXT NOT NULL DEFAULT 'manual-browser',
+  comps_json       TEXT,                            -- comparable sales detail captured during research
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  UNIQUE(property_id)
+);
+CREATE INDEX IF NOT EXISTS idx_valuations_property ON valuations(property_id);
+
+-- Queue of favorited properties awaiting a manually-compiled valuation.
+-- A row is inserted when a property is favorited and marked done once the
+-- browser-research valuation is posted back via POST /api/valuation.
+CREATE TABLE IF NOT EXISTS valuation_requests (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  property_id  INTEGER NOT NULL REFERENCES properties(property_id),
+  status       TEXT NOT NULL DEFAULT 'pending',     -- pending | done
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  completed_at TEXT,
+  UNIQUE(property_id)
+);

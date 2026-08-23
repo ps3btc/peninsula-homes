@@ -2,7 +2,124 @@
 
 const NOW = () => new Date().toISOString();
 
-export async function upsertActiveHome(db, h, source, onNew) {
+// ---------------------------------------------------------------------------
+// Auto-migration: ensure new tables exist (safe to run repeatedly).
+
+let _migrated = null;
+export function migrate(db) {
+  if (!_migrated) {
+    _migrated = (async () => {
+      // Favorites: global community list (no per-visitor scoping).
+      // If the old table had visitor_id, recreate it.
+      const info = await db.prepare("PRAGMA table_info('favorites')").all();
+      const hasVisitorId = info.results.some((c) => c.name === 'visitor_id');
+      if (hasVisitorId) {
+        await db.prepare(`CREATE TABLE IF NOT EXISTS community_favorites (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          property_id INTEGER NOT NULL REFERENCES properties(property_id),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+          UNIQUE(property_id))`).run();
+        await db.prepare(`INSERT OR IGNORE INTO community_favorites (property_id)
+          SELECT DISTINCT property_id FROM favorites`).run();
+        await db.prepare(`DROP TABLE favorites`).run();
+        await db.prepare(`ALTER TABLE community_favorites RENAME TO favorites`).run();
+      } else {
+        await db.prepare(`CREATE TABLE IF NOT EXISTS favorites (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          property_id INTEGER NOT NULL REFERENCES properties(property_id),
+          created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+          UNIQUE(property_id))`).run();
+      }
+      await db.prepare(`CREATE INDEX IF NOT EXISTS idx_favorites_property ON favorites(property_id)`).run();
+      await db.prepare(`CREATE TABLE IF NOT EXISTS open_houses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, property_id INTEGER NOT NULL REFERENCES properties(property_id),
+        date TEXT NOT NULL, time TEXT, comment TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))`).run();
+      await db.prepare(`CREATE INDEX IF NOT EXISTS idx_open_houses_property ON open_houses(property_id)`).run();
+      await db.prepare(`CREATE INDEX IF NOT EXISTS idx_open_houses_date ON open_houses(date)`).run();
+      // Valuations: fair market value estimates compiled by the manual
+      // browser-research workflow (no external AI API).
+      await db.prepare(`CREATE TABLE IF NOT EXISTS valuations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        property_id INTEGER NOT NULL REFERENCES properties(property_id),
+        estimated_value INTEGER NOT NULL,
+        confidence TEXT NOT NULL DEFAULT 'medium',
+        reasoning TEXT,
+        price_per_sqft INTEGER,
+        comparables_used INTEGER DEFAULT 0,
+        model TEXT NOT NULL DEFAULT 'manual-browser',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+        UNIQUE(property_id))`).run();
+      // Add comps_json (comparable-sales detail captured during research).
+      const valInfo = await db.prepare("PRAGMA table_info('valuations')").all();
+      if (!valInfo.results.some((c) => c.name === 'comps_json')) {
+        await db.prepare(`ALTER TABLE valuations ADD COLUMN comps_json TEXT`).run();
+      }
+      await db.prepare(`CREATE INDEX IF NOT EXISTS idx_valuations_property ON valuations(property_id)`).run();
+      // Valuation requests: queue of favorited properties awaiting a
+      // manually-compiled valuation (processed via the browser research flow).
+      await db.prepare(`CREATE TABLE IF NOT EXISTS valuation_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        property_id INTEGER NOT NULL REFERENCES properties(property_id),
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+        completed_at TEXT,
+        UNIQUE(property_id))`).run();
+    })();
+  }
+  return _migrated;
+}
+
+// ---------------------------------------------------------------------------
+// Favorites (global community list — shared across all visitors)
+
+export async function addFavorite(db, propertyId) {
+  await db
+    .prepare('INSERT OR IGNORE INTO favorites (property_id) VALUES (?)')
+    .bind(propertyId)
+    .run();
+}
+
+export async function removeFavorite(db, propertyId) {
+  await db
+    .prepare('DELETE FROM favorites WHERE property_id = ?')
+    .bind(propertyId)
+    .run();
+}
+
+/** All favorited properties (only active listings), global for all visitors. */
+export async function getFavorites(db) {
+  const { results } = await db
+    .prepare(
+      `SELECT p.* FROM properties p
+       INNER JOIN favorites f ON f.property_id = p.property_id
+       WHERE p.status = 'active'
+       ORDER BY p.listed_date DESC`
+    )
+    .all();
+  return results;
+}
+
+/** Set of all globally favorited property_ids. */
+export async function getFavoritePropertyIds(db) {
+  const { results } = await db
+    .prepare('SELECT property_id FROM favorites')
+    .all();
+  return new Set(results.map((r) => r.property_id));
+}
+
+/** Count of favorites per property (for display). */
+export async function getFavoriteCounts(db, propertyIds) {
+  if (!propertyIds.length) return {};
+  const placeholders = propertyIds.map(() => '?').join(',');
+  const { results } = await db
+    .prepare(`SELECT property_id, COUNT(*) AS n FROM favorites WHERE property_id IN (${placeholders}) GROUP BY property_id`)
+    .bind(...propertyIds)
+    .all();
+  return Object.fromEntries(results.map((r) => [r.property_id, r.n]));
+}
+
+export async function upsertActiveHome(db, h, source) {
   const now = NOW();
   const existing = await db
     .prepare('SELECT property_id, status, price FROM properties WHERE property_id = ?')
@@ -27,7 +144,6 @@ export async function upsertActiveHome(db, h, source, onNew) {
       .prepare('INSERT INTO status_history (property_id, from_status, to_status, price_at_change, source) VALUES (?,?,?,?,?)')
       .bind(h.propertyId, null, 'active', h.price, source)
       .run();
-    if (onNew) await onNew(h);
     return 'new';
   }
 
@@ -108,10 +224,7 @@ export async function insertSoldHome(db, h, source) {
   }
   await db
     .prepare(
-      `INSERT INTO properties (property_id, listing_id, mls_id, address, city, state, zip, url,
-        price, beds, baths, sqft, lot_size, year_built, lat, lng, listed_date, property_type, last_sold_year,
-        status, status_source, sold_price, sold_date, first_seen, last_checked, status_changed_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,???, 'sold', ?,?,?,?, ?, ?)`
+      `INSERT INTO properties (property_id, listing_id, mls_id, address, city, state, zip, url, price, beds, baths, sqft, lot_size, year_built, lat, lng, listed_date, property_type, last_sold_year, status, status_source, sold_price, sold_date, first_seen, last_checked, status_changed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'sold',?,?,?,?,?,?)`
     )
     .bind(
       h.propertyId, h.listingId, h.mlsId, h.address, h.city, h.state, h.zip, h.url,
@@ -145,6 +258,10 @@ export async function setStatus(db, propertyId, toStatus, source, { soldPrice = 
     .prepare("INSERT INTO notification_queue (property_id, event, payload) VALUES (?,?,?)")
     .bind(propertyId, 'status_change', JSON.stringify({ from: existing.status, to: toStatus }))
     .run();
+  // Cancel any pending valuation request when the property goes off-market.
+  if (toStatus === 'pending' || toStatus === 'sold') {
+    await cancelValuationRequest(db, propertyId);
+  }
   return true;
 }
 
@@ -271,6 +388,146 @@ export async function touchChecked(db, propertyId) {
     .prepare('UPDATE properties SET last_checked = ?, updated_at = ? WHERE property_id = ?')
     .bind(NOW(), NOW(), propertyId)
     .run();
+}
+
+// ---------------------------------------------------------------------------
+// Open houses
+
+/** Replace all open-house rows for a property with fresh data from the gis feed. */
+export async function upsertOpenHouses(db, propertyId, openHouses) {
+  await db.prepare('DELETE FROM open_houses WHERE property_id = ?').bind(propertyId).run();
+  for (const oh of openHouses) {
+    await db
+      .prepare('INSERT INTO open_houses (property_id, date, time, comment) VALUES (?,?,?,?)')
+      .bind(propertyId, oh.date, oh.time || null, oh.comment || null)
+      .run();
+  }
+}
+
+/** Upcoming open houses (from today onwards) for a set of property IDs. */
+export async function getUpcomingOpenHouses(db, propertyIds) {
+  if (!propertyIds.length) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const placeholders = propertyIds.map(() => '?').join(',');
+  const { results } = await db
+    .prepare(`SELECT * FROM open_houses WHERE property_id IN (${placeholders}) AND date >= ? ORDER BY date ASC, time ASC`)
+    .bind(...propertyIds, today)
+    .all();
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Valuations (manually compiled via browser research on the listing page)
+
+/** Store or replace a valuation for a property. */
+export async function saveValuation(db, propertyId, valuation, comps = []) {
+  await db
+    .prepare(
+      `INSERT INTO valuations (property_id, estimated_value, confidence, reasoning, price_per_sqft, comparables_used, model, comps_json)
+       VALUES (?,?,?,?,?,?,?,?)
+       ON CONFLICT(property_id) DO UPDATE SET
+         estimated_value=excluded.estimated_value, confidence=excluded.confidence,
+         reasoning=excluded.reasoning, price_per_sqft=excluded.price_per_sqft,
+         comparables_used=excluded.comparables_used, model=excluded.model,
+         comps_json=excluded.comps_json,
+         created_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')`
+    )
+    .bind(
+      propertyId, valuation.estimated_value, valuation.confidence, valuation.reasoning,
+      valuation.price_per_sqft ?? null, valuation.comparables_used ?? comps.length,
+      valuation.model || 'manual-browser', JSON.stringify(comps)
+    )
+    .run();
+}
+
+/** Get the valuation for a property (null if none). */
+export async function getValuation(db, propertyId) {
+  return db.prepare('SELECT * FROM valuations WHERE property_id = ?').bind(propertyId).first();
+}
+
+/** Get valuations for multiple properties. */
+export async function getValuations(db, propertyIds) {
+  if (!propertyIds.length) return [];
+  const placeholders = propertyIds.map(() => '?').join(',');
+  const { results } = await db
+    .prepare(`SELECT * FROM valuations WHERE property_id IN (${placeholders})`)
+    .bind(...propertyIds)
+    .all();
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Valuation requests (queue of favorited properties awaiting research)
+
+/** Queue a manual valuation when a property is newly favorited. */
+export async function addValuationRequest(db, propertyId) {
+  await db
+    .prepare(`INSERT OR IGNORE INTO valuation_requests (property_id) VALUES (?)`)
+    .bind(propertyId)
+    .run();
+}
+
+/** Drop a pending request when the property is unfavorited. */
+export async function cancelValuationRequest(db, propertyId) {
+  await db
+    .prepare(`DELETE FROM valuation_requests WHERE property_id = ? AND status = 'pending'`)
+    .bind(propertyId)
+    .run();
+}
+
+/** Mark a request complete once its valuation has been saved. */
+export async function completeValuationRequest(db, propertyId) {
+  await db
+    .prepare(`UPDATE valuation_requests SET status = 'done', completed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE property_id = ?`)
+    .bind(propertyId)
+    .run();
+}
+
+/** All pending requests joined with property info (for the research flow). */
+export async function getPendingValuationRequests(db) {
+  const { results } = await db
+    .prepare(
+      `SELECT r.property_id, r.created_at AS requested_at, p.address, p.city, p.zip, p.price,
+              p.beds, p.baths, p.sqft, p.lot_size, p.year_built, p.url
+       FROM valuation_requests r
+       INNER JOIN properties p ON p.property_id = r.property_id
+       WHERE r.status = 'pending' AND p.status = 'active'
+       ORDER BY r.created_at ASC`
+    )
+    .all();
+  return results;
+}
+
+/** Find comparable sold properties in the same city (for valuation context). */
+export async function getSoldComps(db, property, limit = 5) {
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM properties
+       WHERE city = ? AND status = 'sold' AND property_id != ?
+         AND sold_price IS NOT NULL AND sold_price > 0
+         AND sqft IS NOT NULL AND sqft > 0
+       ORDER BY ABS(sqft - ?) + ABS(COALESCE(beds, 0) - COALESCE(?, 0)) * 100
+       LIMIT ?`
+    )
+    .bind(property.city, property.property_id, property.sqft || 2000, property.beds || 3, limit)
+    .all();
+  return results;
+}
+
+/** Find similar active listings in the same city (for valuation context). */
+export async function getActiveComps(db, property, limit = 5) {
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM properties
+       WHERE city = ? AND status = 'active' AND property_id != ?
+         AND price IS NOT NULL AND price > 0
+         AND sqft IS NOT NULL AND sqft > 0
+       ORDER BY ABS(sqft - ?) + ABS(COALESCE(beds, 0) - COALESCE(?, 0)) * 100
+       LIMIT ?`
+    )
+    .bind(property.city, property.property_id, property.sqft || 2000, property.beds || 3, limit)
+    .all();
+  return results;
 }
 
 export async function writeScanLog(db, entry) {

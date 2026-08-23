@@ -4,16 +4,16 @@
 
 import { CITIES, MAX_PRICE, MIN_SQFT, fetchActiveHomes, fetchSoldHomes, fetchDetail } from './redfin.js';
 import * as db from './db.js';
-import { onNewListing, sendMailjet, formatHomeText, formatHomeHtml } from './notify.js';
+import { onNewListing, sendMailjet, formatHomeText, formatHomeHtml, sendWeeklyDigest, sendValuationSummary } from './notify.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
   'Access-Control-Allow-Headers': 'content-type, x-scan-token',
 };
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
 
@@ -22,6 +22,9 @@ export default {
         status,
         headers: { ...CORS, 'content-type': 'application/json', 'cache-control': 'no-store' },
       });
+
+    // Auto-migrate new tables (favorites, open_houses).
+    await db.migrate(env.DB);
 
     try {
       if (url.pathname === '/api/health') {
@@ -65,6 +68,104 @@ export default {
         }
         return json({ saved });
       }
+      // --- Favorites API (global community list) ---
+      if (url.pathname === '/api/favorites' && req.method === 'GET') {
+        const [listings, favIds] = await Promise.all([
+          db.getFavorites(env.DB),
+          db.getFavoritePropertyIds(env.DB),
+        ]);
+        return json({ count: listings.length, listings, favoriteIds: [...favIds] });
+      }
+      if (url.pathname === '/api/favorite' && req.method === 'POST') {
+        const { propertyId } = await req.json().catch(() => ({}));
+        if (!propertyId) return json({ error: 'propertyId required' }, 400);
+        const pid = Number(propertyId);
+        // Check if this is a new favorite (not already in the set).
+        const currentIds = await db.getFavoritePropertyIds(env.DB);
+        const isNew = !currentIds.has(pid);
+        await db.addFavorite(env.DB, pid);
+        // If newly favorited (and not yet valued), queue a manual valuation
+        // request — but only for active listings (not pending/sold).
+        if (isNew && !(await db.getValuation(env.DB, pid))) {
+          const prop = await env.DB.prepare('SELECT status FROM properties WHERE property_id = ?').bind(pid).first();
+          if (prop && prop.status === 'active') {
+            await db.addValuationRequest(env.DB, pid);
+          }
+        }
+        return json({ ok: true, valuationQueued: isNew });
+      }
+      if (url.pathname === '/api/favorite' && req.method === 'DELETE') {
+        const { propertyId } = await req.json().catch(() => ({}));
+        if (!propertyId) return json({ error: 'propertyId required' }, 400);
+        await db.removeFavorite(env.DB, Number(propertyId));
+        await db.cancelValuationRequest(env.DB, Number(propertyId));
+        return json({ ok: true });
+      }
+      if (url.pathname === '/api/favorite-ids') {
+        const ids = await db.getFavoritePropertyIds(env.DB);
+        return json({ favoriteIds: [...ids] });
+      }
+      // --- Valuation API ---
+      const valMatch = url.pathname.match(/^\/api\/valuation\/(\d+)$/);
+      if (valMatch && req.method === 'GET') {
+        const pid = Number(valMatch[1]);
+        const valuation = await db.getValuation(env.DB, pid);
+        if (!valuation) return json({ error: 'no valuation available' }, 404);
+        const property = await env.DB.prepare('SELECT * FROM properties WHERE property_id = ?').bind(pid).first();
+        let comps = [];
+        try { comps = valuation.comps_json ? JSON.parse(valuation.comps_json) : []; } catch { /* ignore */ }
+        return json({ property, valuation, comps });
+      }
+      if (url.pathname === '/api/valuations' && req.method === 'GET') {
+        const idsParam = url.searchParams.get('ids');
+        if (!idsParam) return json({ valuations: [] });
+        const ids = idsParam.split(',').map(Number).filter(Boolean);
+        const valuations = await db.getValuations(env.DB, ids);
+        return json({ valuations });
+      }
+      // Pending valuation requests (favorited properties awaiting research).
+      // Consumed by the manual browser-research workflow.
+      if (url.pathname === '/api/valuation-requests' && req.method === 'GET') {
+        if (env.SCAN_TOKEN && req.headers.get('x-scan-token') !== env.SCAN_TOKEN) {
+          return json({ error: 'unauthorized' }, 401);
+        }
+        return json({ requests: await db.getPendingValuationRequests(env.DB) });
+      }
+      // Save a manually-compiled valuation (from browser research) and send
+      // the summary email covering all favorited properties.
+      if (url.pathname === '/api/valuation' && req.method === 'POST') {
+        if (!env.SCAN_TOKEN || req.headers.get('x-scan-token') !== env.SCAN_TOKEN) {
+          return json({ error: 'unauthorized' }, 401);
+        }
+        const body = await req.json().catch(() => null);
+        const pid = Number(body && body.propertyId);
+        if (!pid) return json({ error: 'propertyId required' }, 400);
+        const est = Number(body && body.estimated_value);
+        if (!est) return json({ error: 'estimated_value required' }, 400);
+        const confidence = ['low', 'medium', 'high'].includes(body.confidence) ? body.confidence : 'medium';
+        const comps = Array.isArray(body.comps) ? body.comps.slice(0, 20) : [];
+        const valuation = {
+          estimated_value: est,
+          confidence,
+          reasoning: String(body.reasoning || '').slice(0, 5000),
+          price_per_sqft: Number(body.price_per_sqft) || null,
+          comparables_used: Number(body.comparables_used) || comps.length,
+          model: 'manual-browser',
+        };
+        await db.saveValuation(env.DB, pid, valuation, comps);
+        await db.completeValuationRequest(env.DB, pid);
+        // Email summary of every favorited property's valuation.
+        const email = await sendValuationSummary(env.DB, env, pid).catch((e) => ({ sent: false, error: String(e && e.message || e) }));
+        return json({ ok: true, email });
+      }
+      // --- Weekly digest (manual trigger) ---
+      if (url.pathname === '/api/digest' && req.method === 'POST') {
+        if (env.SCAN_TOKEN && req.headers.get('x-scan-token') !== env.SCAN_TOKEN) {
+          return json({ error: 'unauthorized' }, 401);
+        }
+        const result = await sendWeeklyDigest(env.DB, env);
+        return json(result);
+      }
       if (url.pathname === '/api/test-email' && req.method === 'POST') {
         if (!env.SCAN_TOKEN || req.headers.get('x-scan-token') !== env.SCAN_TOKEN) {
           return json({ error: 'unauthorized' }, 401);
@@ -107,7 +208,7 @@ export default {
       if (url.pathname === '/') {
         return json({
           service: 'peninsula-homes-api',
-          endpoints: ['/api/health', '/api/listings?status=active|pending|sold', '/api/stats', '/api/property/:id', '/api/scans', 'POST /api/scan', 'POST /api/schools'],
+          endpoints: ['/api/health', '/api/listings?status=active|pending|sold', '/api/stats', '/api/property/:id', '/api/scans', 'GET /api/favorites', 'POST /api/favorite', 'DELETE /api/favorite', 'GET /api/favorite-ids', 'GET /api/valuation/:id', 'GET /api/valuations?ids=1,2,3', 'GET /api/valuation-requests', 'POST /api/valuation', 'POST /api/scan', 'POST /api/schools', 'POST /api/digest'],
           cities: CITIES.map((c) => c.name),
           maxPrice: MAX_PRICE,
           minSqft: MIN_SQFT,
@@ -115,11 +216,18 @@ export default {
       }
       return json({ error: 'not found' }, 404);
     } catch (e) {
+      console.error('API error:', e && e.message || e, e && e.stack || '');
       return json({ error: String(e && e.message ? e.message : e) }, 500);
     }
   },
 
-  async scheduled(_event, env) {
+  async scheduled(event, env) {
+    // Friday cron (0 9 * * 5): send weekly open-house digest.
+    // Other cron triggers: run the regular scan.
+    if (event && event.cron === '0 9 * * 5') {
+      const result = await sendWeeklyDigest(env.DB, env);
+      console.log('Weekly digest:', JSON.stringify(result));
+    }
     await runScan(env, 'cron');
   },
 };
@@ -143,7 +251,11 @@ async function runScan(env, trigger) {
     notes: [],
   };
 
+  try {
+
   // Phase 1 — active listings per city (source of truth for the Available tab).
+  // Track new listings so emails can be sent after school data is collected.
+  const newListingIds = [];
   for (const city of CITIES) {
     const { homes, failed } = await fetchActiveHomes(city, budget);
     if (failed) {
@@ -152,8 +264,15 @@ async function runScan(env, trigger) {
     }
     summary.active_seen += homes.length;
     for (const h of homes) {
-      const r = await db.upsertActiveHome(env.DB, h, 'redfin-active', (nh) => onNewListing(env.DB, nh, env));
-      if (r === 'new') summary.new_listings++;
+      const r = await db.upsertActiveHome(env.DB, h, 'redfin-active');
+      if (r === 'new') {
+        summary.new_listings++;
+        newListingIds.push(h.propertyId);
+      }
+      // Persist open house dates from the gis feed.
+      if (h.openHouses && h.openHouses.length) {
+        await db.upsertOpenHouses(env.DB, h.propertyId, h.openHouses);
+      }
     }
   }
 
@@ -244,6 +363,11 @@ async function runScan(env, trigger) {
   if (detailStatuses.length) summary.notes.push(`detail page statuses: ${detailStatuses.slice(0, 12).join(',')}`);
   if (summary.schools_found) summary.notes.push(`collected school zoning for ${summary.schools_found} properties`);
 
+  // Phase 3b — send new-listing emails now that school data has been collected.
+  for (const pid of newListingIds) {
+    await onNewListing(env.DB, pid, env);
+  }
+
   // Phase 4 — recently-sold pages feed the Sold tab and confirm sales.
   if (!wafOpen()) {
     for (const city of CITIES) {
@@ -266,7 +390,21 @@ async function runScan(env, trigger) {
   summary.fetches = budget.used;
   await db.writeScanLog(env.DB, summary);
   return summary;
+
+  } catch (e) {
+    // Attach phase info for debugging.
+    const msg = `scan failed: ${e.message || e}`;
+    console.error(msg, e.stack || '');
+    summary.notes.push(msg);
+    summary.finished_at = new Date().toISOString();
+    summary.fetches = budget.used;
+    await db.writeScanLog(env.DB, summary).catch(() => {});
+    throw e;
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
 
 function pathOf(url) {
   if (!url) return null;
