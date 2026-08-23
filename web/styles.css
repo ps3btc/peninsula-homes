@@ -167,6 +167,9 @@ a.val-badge:hover { border-color: var(--green); background: rgba(52, 201, 142, .
   transition: background .15s ease, color .15s ease;
 }
 .comp-view-link:hover { background: var(--accent); color: #08101f; }
+
+/* Comparable cards (mobile-only, hidden on desktop) */
+.comp-cards { display: none; }
 .vd-reasoning { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 14px; font-size: 14px; color: var(--text); white-space: pre-wrap; }
 .vd-reasoning-list { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 14px 14px 14px 30px; font-size: 14px; color: var(--text); margin: 0; list-style: disc; }
 .vd-reasoning-list li { margin-bottom: 8px; line-height: 1.55; }
@@ -197,11 +200,25 @@ a.btn { display: inline-block; text-decoration: none; }
   .vd-links { flex-direction: column; }
   .vd-links .btn { text-align: center; }
 
-  /* Comparable table: horizontal scroll on mobile */
-  .comp-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -12px; padding: 0 12px; }
-  .comp-table { min-width: 560px; }
-  .comp-table td, .comp-table th { padding: 8px 6px; font-size: 12px; }
-  .comp-view-link { padding: 10px 12px; font-size: 13px; min-height: 44px; display: inline-flex; align-items: center; }
+  /* Comparable cards replace table on mobile */
+  .comp-table-wrap { display: none; }
+  .comp-cards { display: flex; flex-direction: column; gap: 10px; }
+  .comp-card {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .comp-card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .comp-card-addr { font-weight: 600; font-size: 14px; flex: 1; }
+  .comp-card-type { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px;
+    color: var(--muted); white-space: nowrap; padding-top: 2px; }
+  .comp-card-stats { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; color: var(--muted); }
+  .comp-card-price { font-weight: 700; color: var(--text); font-size: 15px; }
+  .comp-card-ppsf { color: var(--accent); font-weight: 600; }
+  .comp-card-link { margin-top: 2px; }
+  .comp-card-link .comp-view-link {
+    padding: 10px 14px; font-size: 13px; min-height: 44px;
+    display: flex; align-items: center; justify-content: center; width: 100%;
+  }
 
   /* Touch targets: minimum 44px */
   .fav-btn { padding: 8px; font-size: 24px; }

@@ -243,6 +243,29 @@ function compRow(c) {
   </tr>`;
 }
 
+/** Render a comparable as a compact card for mobile. */
+function compCard(c) {
+  const price = c.price != null ? fmtMoney(c.price) : '—';
+  const ppsf = c.price != null && c.sqft ? '$' + fmtNum(Math.round(c.price / c.sqft)) : '—';
+  const typeLabel = c.type === 'sold' ? `Sold${c.sold_date ? ' ' + esc(c.sold_date) : ''}` : c.type === 'active' ? 'Active' : esc(c.type || 'Comp');
+  const redfinUrl = compRedfinUrl(c);
+  const viewLink = redfinUrl
+    ? `<a class="comp-view-link" href="${esc(redfinUrl)}" target="_blank" rel="noopener">View on Redfin &nearr;</a>`
+    : '';
+  return `<div class="comp-card">
+    <div class="comp-card-header">
+      <span class="comp-card-addr">${esc(c.address || '—')}, ${esc(c.city || '')}</span>
+      <span class="comp-card-type">${typeLabel}</span>
+    </div>
+    <div class="comp-card-stats">
+      <span class="comp-card-price">${price}</span>
+      <span class="comp-card-detail">${c.beds ?? '—'} bd / ${c.baths ?? '—'} ba &middot; ${fmtNum(c.sqft)} sqft</span>
+      <span class="comp-card-ppsf">${ppsf}/sqft</span>
+    </div>
+    ${viewLink ? `<div class="comp-card-link">${viewLink}</div>` : ''}
+  </div>`;
+}
+
 function valuationDetailHtml({ property: p, valuation: v, comps }) {
   const listPrice = p.price || 0;
   const diff = v.estimated_value - listPrice;
@@ -257,7 +280,8 @@ function valuationDetailHtml({ property: p, valuation: v, comps }) {
     ? `<div class="comp-table-wrap"><table class="comp-table">
         <thead><tr><th>Comparable</th><th>Status</th><th>Price</th><th>Bd/Ba</th><th>Sqft</th><th>$/Sqft</th><th></th></tr></thead>
         <tbody>${comps.map(compRow).join('')}</tbody>
-      </table></div>`
+      </table></div>
+      <div class="comp-cards">${comps.map(compCard).join('')}</div>`
     : '<p class="empty">No comparables recorded for this valuation.</p>';
 
   return `<div class="val-detail">
